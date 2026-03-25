@@ -147,6 +147,7 @@ public static class MacKeys
     // Virtual-key codes
     private const int VK_BACK      = 0x08;
     private const int VK_TAB       = 0x09;
+    private const int VK_SPACE     = 0x20;
     private const int VK_SHIFT     = 0x10;
     private const int VK_CONTROL   = 0x11;
     private const int VK_CAPITAL   = 0x14;
@@ -335,12 +336,22 @@ public static class MacKeys
 
         // ====== Key-down mappings only below this line ======
 
+        // ---------- Cmd+Space  ->  Win+S (Windows Search, like Spotlight) ----------
+        if (vk == (uint)VK_SPACE)
+        {
+            SendKey((ushort)VK_LWIN, true,  false);
+            SendKey(0x53,             true,  false);  // S
+            SendKey(0x53,             false, false);
+            SendKey((ushort)VK_LWIN, false, false);
+            return (IntPtr)1;
+        }
+
         // ---------- Cmd+Q  ->  Alt+F4 (Quit application) ----------
         if (vk == 0x51)  // Q
         {
             SendKey((ushort)VK_LMENU, true,  false);
-            SendKey((ushort)VK_F4,    true,  false);
-            SendKey((ushort)VK_F4,    false, false);
+            SendKey((ushort)VK_F4,    true,  true);
+            SendKey((ushort)VK_F4,    false, true);
             SendKey((ushort)VK_LMENU, false, false);
             return (IntPtr)1;
         }
