@@ -45,7 +45,33 @@ public class MacKeysTray : Form
     [DllImport("user32.dll")]
     private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
 
+    [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int vKey);
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    private static extern int GetClassName(IntPtr hWnd, System.Text.StringBuilder lpClassName, int nMaxCount);
+
+    [DllImport("user32.dll")]
+    private static extern bool GetGUIThreadInfo(uint idThread, ref GUITHREADINFO lpgui);
+
     // ===================== Structs =====================
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct GUITHREADINFO
+    {
+        public int cbSize;
+        public uint flags;
+        public IntPtr hwndActive;
+        public IntPtr hwndFocus;
+        public IntPtr hwndCapture;
+        public IntPtr hwndMenuOwner;
+        public IntPtr hwndMoveSize;
+        public IntPtr hwndCaret;
+        public int rcCaretLeft;
+        public int rcCaretTop;
+        public int rcCaretRight;
+        public int rcCaretBottom;
+    }
 
     [StructLayout(LayoutKind.Sequential)]
     private struct KBDLLHOOKSTRUCT
@@ -125,7 +151,9 @@ public class MacKeysTray : Form
     private const int VK_RMENU   = 0xA5;
     private const int VK_LWIN    = 0x5B;
     private const int VK_RWIN    = 0x5C;
-    private const int VK_F4      = 0x73;
+    private const int VK_RETURN = 0x0D;
+    private const int VK_F2     = 0x71;
+    private const int VK_F4     = 0x73;
     private const int VK_NUMLOCK = 0x90;
     private const int VK_SCROLL  = 0x91;
 
@@ -239,6 +267,34 @@ public class MacKeysTray : Form
             }
         }
         catch { }
+        return false;
+    }
+
+    // ===================== Explorer Detection =====================
+
+    private static bool IsForegroundExplorerBrowser()
+    {
+        try
+        {
+            IntPtr hwnd = GetForegroundWindow();
+            if (hwnd == IntPtr.Zero) return false;
+            System.Text.StringBuilder className = new System.Text.StringBuilder(256);
+            GetClassName(hwnd, className, 256);
+            string cls = className.ToString();
+            // CabinetWClass = Explorer window, Progman/WorkerW = Desktop
+            return cls == "CabinetWClass" || cls == "Progman" || cls == "WorkerW";
+        }
+        catch { return false; }
+    }
+
+    private static bool IsTextInputActive()
+    {
+        GUITHREADINFO info = new GUITHREADINFO();
+        info.cbSize = Marshal.SizeOf(typeof(GUITHREADINFO));
+        if (GetGUIThreadInfo(0, ref info))
+        {
+            return info.hwndCaret != IntPtr.Zero;
+        }
         return false;
     }
 
@@ -560,6 +616,51 @@ public class MacKeysTray : Form
             return (IntPtr)1;  // suppress real Left Win
         }
 
+        // ====== Option (Left Alt) + Arrow → Ctrl+Arrow (word/paragraph navigation) ======
+        // Shift state is physical, so Option+Shift+Arrow → Ctrl+Shift+Arrow (selection)
+        if (!cmdKeyDown &&
+            (vk == (uint)VK_LEFT || vk == (uint)VK_RIGHT || vk == (uint)VK_UP || vk == (uint)VK_DOWN) &&
+            (GetAsyncKeyState(VK_LMENU) & 0x8000) != 0)
+        {
+            if (isUp) return (IntPtr)1;  // suppress key-up
+
+            // Cancel Alt to prevent menu activation
+            SendKey((ushort)VK_LMENU, false, false);
+
+            // Send Ctrl+Arrow
+            SendKey((ushort)VK_LCONTROL, true,  false);
+            SendKey((ushort)vk,          true,  true);
+            SendKey((ushort)vk,          false, true);
+            SendKey((ushort)VK_LCONTROL, false, false);
+
+            // Re-press Alt so subsequent arrows still work while held
+            SendKey((ushort)VK_LMENU, true, false);
+
+            return (IntPtr)1;
+        }
+
+        // ====== Explorer: Enter → F2 (rename), Space → Enter (open) ======
+        // Only when no modifier held and no text input is active (rename, search bar)
+        if (!cmdKeyDown && (vk == (uint)VK_RETURN || vk == (uint)VK_SPACE) &&
+            (GetAsyncKeyState(VK_LMENU) & 0x8000) == 0 &&
+            IsForegroundExplorerBrowser() && !IsTextInputActive())
+        {
+            if (isUp) return (IntPtr)1;
+
+            if (vk == (uint)VK_RETURN)
+            {
+                SendKey((ushort)VK_F2, true,  false);
+                SendKey((ushort)VK_F2, false, false);
+                return (IntPtr)1;
+            }
+            if (vk == (uint)VK_SPACE)
+            {
+                SendKey((ushort)VK_RETURN, true,  false);
+                SendKey((ushort)VK_RETURN, false, false);
+                return (IntPtr)1;
+            }
+        }
+
         if (!cmdKeyDown)
             return CallNextHookEx(hookId, nCode, wParam, lParam);
 
@@ -604,13 +705,21 @@ public class MacKeysTray : Form
             return (IntPtr)1;
         }
 
-        // Cmd+Backspace -> Ctrl+Backspace
+        // Cmd+Backspace -> Delete (move to trash) in Explorer, Ctrl+Backspace (delete word) elsewhere
         if (vk == (uint)VK_BACK)
         {
-            SendKey((ushort)VK_LCONTROL, true,  false);
-            SendKey((ushort)VK_BACK,     true,  false);
-            SendKey((ushort)VK_BACK,     false, false);
-            SendKey((ushort)VK_LCONTROL, false, false);
+            if (IsForegroundExplorerBrowser())
+            {
+                SendKey((ushort)VK_DELETE, true,  true);
+                SendKey((ushort)VK_DELETE, false, true);
+            }
+            else
+            {
+                SendKey((ushort)VK_LCONTROL, true,  false);
+                SendKey((ushort)VK_BACK,     true,  false);
+                SendKey((ushort)VK_BACK,     false, false);
+                SendKey((ushort)VK_LCONTROL, false, false);
+            }
             return (IntPtr)1;
         }
 

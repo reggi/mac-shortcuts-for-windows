@@ -21,6 +21,8 @@ Intercepts the **Command (⌘) key** (which Windows sees as Left Win) and remaps
 ```
 Mac Keys/
 ├── Start-MacKeys.bat              ← launch the tray version (recommended)
+├── Start-MacKeys-Hidden.vbs       ← fully hidden launch (no window flash)
+├── Add-Startup.bat                ← run once to auto-start on login
 ├── MacKeysTray.ps1                ← system tray app (icon by clock, preferences, pause/resume)
 ├── README.md
 └── Console/
@@ -108,11 +110,17 @@ Some apps — especially games and game launchers — don't play well with keybo
 
 Settings are saved to `%AppData%\MacKeys\excluded.txt` and persist across restarts.
 
+## Running in the Background (No Window)
+
+Double-click **`Start-MacKeys-Hidden.vbs`** instead of the `.bat` file. This launches PowerShell completely hidden — no console window flash, no taskbar entry. The ⌘ tray icon still appears as normal.
+
 ## Auto-Start on Login
 
-1. Press `Win+R`
-2. Type `shell:startup` and press Enter
-3. Copy a shortcut to `Start-MacKeys.bat` into that folder
+**Automatic:** Double-click **`Add-Startup.bat`**. It creates a shortcut in your Windows Startup folder so Mac Keys launches silently every time you log in.
+
+**Manual alternative:**
+1. Press `Win+R`, type `shell:startup`, press Enter
+2. Copy a shortcut to `Start-MacKeys-Hidden.vbs` into that folder
 
 ## Key Behavior
 
