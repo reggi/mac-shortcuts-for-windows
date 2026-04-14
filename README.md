@@ -8,9 +8,9 @@ Intercepts the **Command (⌘) key** (which Windows sees as Left Win) and remaps
 
 ## Quick Start
 
-**Tray version (recommended):** Double-click **`Start-MacKeys.bat`** in the root folder. A ⌘ icon appears in your system tray.
+**Tray version (recommended):** Double-click **`RunTray.vbs`**. A ⌘ icon appears in your system tray - no window flash.
 
-**Console version:** Double-click **`Console\Start-MacKeys-Console.bat`**. A terminal window stays open showing status.
+**Console version:** Double-click **`RunConsole.bat`**. A terminal window stays open showing status.
 
 ## Requirements
 
@@ -19,15 +19,15 @@ Intercepts the **Command (⌘) key** (which Windows sees as Left Win) and remaps
 ## Folder Structure
 
 ```
-Mac Keys/
-├── Start-MacKeys.bat              ← launch the tray version (recommended)
-├── Start-MacKeys-Hidden.vbs       ← fully hidden launch (no window flash)
-├── Add-Startup.bat                ← run once to auto-start on login
-├── MacKeysTray.ps1                ← system tray app (icon by clock, preferences, pause/resume)
-├── README.md
-└── Console/
-    ├── Start-MacKeys-Console.bat  ← launch the console version
-    └── MacKeys.ps1                ← console app (terminal window with status output)
+RunTray.vbs              ← double-click to start (recommended)
+RunConsole.bat           ← launch the console version
+README.md
+src/
+  MacKeysEngine.cs       ← shared keyboard-hook engine (C#)
+  MacKeysTray.cs         ← tray UI (C#)
+  MacKeysTrayHost.ps1    ← tray bootstrap script
+  MacKeysConsole.cs      ← console entry point (C#)
+  MacKeysConsoleHost.ps1 ← console bootstrap script
 ```
 
 ## Keyboard Shortcuts
@@ -112,15 +112,12 @@ Settings are saved to `%AppData%\MacKeys\excluded.txt` and persist across restar
 
 ## Running in the Background (No Window)
 
-Double-click **`Start-MacKeys-Hidden.vbs`** instead of the `.bat` file. This launches PowerShell completely hidden — no console window flash, no taskbar entry. The ⌘ tray icon still appears as normal.
+**`RunTray.vbs`** starts PowerShell completely hidden with no console window flash and no taskbar entry. The ⌘ tray icon still appears as normal.
 
 ## Auto-Start on Login
 
-**Automatic:** Double-click **`Add-Startup.bat`**. It creates a shortcut in your Windows Startup folder so Mac Keys launches silently every time you log in.
-
-**Manual alternative:**
 1. Press `Win+R`, type `shell:startup`, press Enter
-2. Copy a shortcut to `Start-MacKeys-Hidden.vbs` into that folder
+2. Copy a shortcut to `RunTray.vbs` into that folder
 
 ## Key Behavior
 
