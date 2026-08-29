@@ -23,11 +23,14 @@ RunTray.vbs              ← double-click to start (recommended)
 RunConsole.bat           ← launch the console version
 README.md
 src/
+  MacKeysRules.cs        ← deterministic, unit-tested shortcut mappings
   MacKeysEngine.cs       ← shared keyboard-hook engine (C#)
   MacKeysTray.cs         ← tray UI (C#)
   MacKeysTrayHost.ps1    ← tray bootstrap script
   MacKeysConsole.cs      ← console entry point (C#)
   MacKeysConsoleHost.ps1 ← console bootstrap script
+tests/
+  MacKeysRulesTests.cs   ← shortcut-rule unit tests
 ```
 
 ## Keyboard Shortcuts
@@ -129,6 +132,17 @@ Settings are saved to `%AppData%\MacKeys\excluded.txt` and persist across restar
 ## How It Works
 
 The script uses `Add-Type` to compile C# code at runtime that installs a [low-level keyboard hook](https://learn.microsoft.com/en-us/windows/win32/winmsg/lowlevelkeyboardproc) (`WH_KEYBOARD_LL`). This intercepts keystrokes system-wide before they reach any application, translates Command-key combos into their Windows equivalents via `SendInput`, and suppresses the original keypress. Synthetic events are tagged with a marker (`dwExtraInfo`) so the hook ignores its own output and avoids infinite loops.
+
+## Tests
+
+The application still requires only built-in Windows components at runtime. Development tests require the .NET 8 SDK:
+
+```powershell
+dotnet test .\tests\MacKeysRules.Tests.csproj
+.\tests\Test-HostCompilation.ps1
+```
+
+GitHub Actions runs both checks on `windows-latest` for pushes and pull requests.
 
 ## Troubleshooting
 

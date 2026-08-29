@@ -8,9 +8,10 @@
 #>
 
 $engineCode = Get-Content "$PSScriptRoot\MacKeysEngine.cs" -Raw
+$rulesCode  = Get-Content "$PSScriptRoot\MacKeysRules.cs" -Raw
 $trayCode   = Get-Content "$PSScriptRoot\MacKeysTray.cs" -Raw
 
-Add-Type -TypeDefinition ($engineCode + $trayCode) -ReferencedAssemblies System.Windows.Forms, System.Drawing
+Add-Type -TypeDefinition ($engineCode + $rulesCode + $trayCode) -ReferencedAssemblies System.Windows.Forms, System.Drawing
 
 [MacKeysTray]::VbsPath = Join-Path (Split-Path $PSScriptRoot -Parent) "RunTray.vbs"
 [MacKeysTray]::Main()

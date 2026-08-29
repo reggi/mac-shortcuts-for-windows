@@ -161,9 +161,10 @@ public static class MacKeysEngine
 
     private static IntPtr hookId = IntPtr.Zero;
     private static LowLevelKeyboardProc hookProc;
-    private static bool cmdKeyDown   = false;
-    private static bool optKeyDown   = false;
-    private static bool inAltTabMode = false;
+    private static volatile bool cmdKeyDown   = false;
+    private static volatile bool optKeyDown   = false;
+    private static volatile bool inAltTabMode = false;
+    private static bool forwardedOptionAlt = false;
     private static int  cmdDownTick  = 0;
 
     /// <summary>
@@ -174,22 +175,11 @@ public static class MacKeysEngine
     /// </summary>
     public static Func<bool> IsDisabledCheck = () => false;
 
-    // ===================== Key Sets =====================
-
-    private static readonly HashSet<uint> ctrlMappedKeys = new HashSet<uint>
-    {
-        0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49,
-        0x4B, 0x4C, 0x4E, 0x4F, 0x50, 0x52, 0x53, 0x54, 0x55,
-        0x56, 0x57, 0x58, 0x5A
-    };
-
-    private static readonly HashSet<uint> passthroughKeys = new HashSet<uint>
-    {
-        (uint)VK_SHIFT, (uint)VK_LSHIFT, (uint)VK_RSHIFT,
-        (uint)VK_CONTROL, (uint)VK_LCONTROL, (uint)VK_RCONTROL,
-        (uint)VK_LMENU, (uint)VK_RMENU,
-        (uint)VK_CAPITAL, (uint)VK_NUMLOCK, (uint)VK_SCROLL
-    };
+    /// <summary>
+    /// When true, Left Alt acts as Command instead of Left Win.
+    /// Used for standard PC keyboards where Alt is left of spacebar.
+    /// </summary>
+    public static bool UseAltAsCommand = false;
 
     // ===================== Explorer Detection =====================
 
@@ -201,8 +191,7 @@ public static class MacKeysEngine
             if (hwnd == IntPtr.Zero) return false;
             System.Text.StringBuilder className = new System.Text.StringBuilder(256);
             GetClassName(hwnd, className, 256);
-            string cls = className.ToString();
-            return cls == "CabinetWClass" || cls == "Progman" || cls == "WorkerW";
+            return MacKeysRules.IsExplorerWindowClass(className.ToString());
         }
         catch { return false; }
     }
@@ -222,6 +211,10 @@ public static class MacKeysEngine
 
     public static bool InstallHook()
     {
+        if (hookId != IntPtr.Zero)
+            return true;
+
+        ResetState();
         hookProc = HookCallback;
         using (Process proc = Process.GetCurrentProcess())
         using (ProcessModule mod = proc.MainModule)
@@ -229,8 +222,6 @@ public static class MacKeysEngine
             hookId = SetWindowsHookEx(WH_KEYBOARD_LL, hookProc,
                          GetModuleHandle(mod.ModuleName), 0);
         }
-        if (hookId != IntPtr.Zero)
-            DisableWinLLock();
         return hookId != IntPtr.Zero;
     }
 
@@ -242,11 +233,24 @@ public static class MacKeysEngine
             ReleaseInjectedModifiers();
             cmdKeyDown = false;
             optKeyDown = false;
+            forwardedOptionAlt = false;
 
             UnhookWindowsHookEx(hookId);
             hookId = IntPtr.Zero;
-            EnableWinLLock();
         }
+    }
+
+    /// <summary>
+    /// Clear all internal state and release synthetic modifiers. Hosts call
+    /// this when pausing or changing modes so a half-finished shortcut cannot
+    /// affect later keystrokes.
+    /// </summary>
+    public static void ResetState()
+    {
+        cmdKeyDown = false;
+        optKeyDown = false;
+        forwardedOptionAlt = false;
+        ReleaseInjectedModifiers();
     }
 
     /// <summary>
@@ -267,31 +271,6 @@ public static class MacKeysEngine
         SendKey((ushort)VK_LMENU,   false, false);
     }
 
-    private const string LockPolicyKey =
-        @"Software\Microsoft\Windows\CurrentVersion\Policies\System";
-
-    private static void DisableWinLLock()
-    {
-        try
-        {
-            using (var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(LockPolicyKey))
-                key.SetValue("DisableLockWorkstation", 1,
-                    Microsoft.Win32.RegistryValueKind.DWord);
-        }
-        catch { }
-    }
-
-    private static void EnableWinLLock()
-    {
-        try
-        {
-            using (var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(LockPolicyKey, true))
-                if (key != null)
-                    key.DeleteValue("DisableLockWorkstation", false);
-        }
-        catch { }
-    }
-
     // ===================== Hook Callback =====================
 
     private static IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
@@ -304,6 +283,24 @@ public static class MacKeysEngine
 
         if (data.dwExtraInfo == MAGIC)
             return CallNextHookEx(hookId, nCode, wParam, lParam);
+
+        int  msg    = wParam.ToInt32();
+        bool isDown = (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN);
+        bool isUp   = (msg == WM_KEYUP   || msg == WM_SYSKEYUP);
+        uint vk     = data.vkCode;
+
+        // Disabled state is checked for every event. Previously it was only
+        // checked for modifier events, so pausing or entering an excluded app
+        // while Command was held left the engine remapping the whole keyboard.
+        bool disabled = false;
+        try { disabled = IsDisabledCheck != null && IsDisabledCheck(); }
+        catch { disabled = false; }
+        if (disabled)
+        {
+            if (cmdKeyDown || optKeyDown || inAltTabMode || forwardedOptionAlt)
+                ResetState();
+            return CallNextHookEx(hookId, nCode, wParam, lParam);
+        }
 
         // Guard against stuck Command key — if the key-up was lost (e.g. UAC,
         // lock screen), check whether the Win key is actually still held.
@@ -322,21 +319,20 @@ public static class MacKeysEngine
             }
         }
 
-        int  msg    = wParam.ToInt32();
-        bool isDown = (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN);
-        bool isUp   = (msg == WM_KEYUP   || msg == WM_SYSKEYUP);
-        uint vk     = data.vkCode;
+        // Only Left Win is Command. Right Win always remains a normal Win key.
+        if (vk == (uint)VK_RWIN)
+            return CallNextHookEx(hookId, nCode, wParam, lParam);
 
-        // Track Left/Right Win (Command key)
-        if (vk == (uint)VK_LWIN || vk == (uint)VK_RWIN)
+        if (vk == (uint)VK_LWIN)
         {
-            if (IsDisabledCheck())
+            if (UseAltAsCommand)
                 return CallNextHookEx(hookId, nCode, wParam, lParam);
 
             if (isDown)
             {
                 cmdKeyDown = true;
                 cmdDownTick = Environment.TickCount;
+                return (IntPtr)1;
             }
             else if (isUp)
             {
@@ -346,21 +342,61 @@ public static class MacKeysEngine
                     SendKey((ushort)VK_LMENU, false, false);
                     inAltTabMode = false;
                 }
+                // Let Windows observe the key-up even though key-down was
+                // suppressed. This clears its internal Win modifier state
+                // without opening Start.
+                return CallNextHookEx(hookId, nCode, wParam, lParam);
             }
             return (IntPtr)1;
         }
 
-        // ====== Track Left Alt (Option key) — suppress to prevent menu activation ======
+        // ====== Track Left Alt ======
         if (vk == (uint)VK_LMENU)
         {
-            if (IsDisabledCheck())
-                return CallNextHookEx(hookId, nCode, wParam, lParam);
-
-            if (isDown)
-                optKeyDown = true;
-            else if (isUp)
-                optKeyDown = false;
-            return (IntPtr)1;
+            if (UseAltAsCommand)
+            {
+                // Standard mode: Left Alt = Command
+                if (isDown)
+                {
+                    cmdKeyDown = true;
+                    cmdDownTick = Environment.TickCount;
+                }
+                else if (isUp)
+                {
+                    cmdKeyDown = false;
+                    if (inAltTabMode)
+                    {
+                        SendKey((ushort)VK_LMENU, false, false);
+                        inAltTabMode = false;
+                    }
+                    return CallNextHookEx(hookId, nCode, wParam, lParam);
+                }
+                return (IntPtr)1;
+            }
+            else
+            {
+                // Mac mode: Left Alt = Option
+                if (isDown)
+                {
+                    optKeyDown = true;
+                    forwardedOptionAlt = false;
+                }
+                else if (isUp)
+                {
+                    optKeyDown = false;
+                    if (forwardedOptionAlt)
+                        SendKey((ushort)VK_LMENU, false, false);
+                    else
+                    {
+                        // Preserve the normal bare-Alt menu behavior when no
+                        // Option shortcut consumed the key.
+                        SendKey((ushort)VK_LMENU, true, false);
+                        SendKey((ushort)VK_LMENU, false, false);
+                    }
+                    forwardedOptionAlt = false;
+                }
+                return (IntPtr)1;
+            }
         }
 
         // ====== Option (Left Alt) + Arrow → Ctrl+Arrow (word/paragraph navigation) ======
@@ -395,32 +431,43 @@ public static class MacKeysEngine
             return (IntPtr)1;
         }
 
+        // Option combined with an unmapped key should still behave as normal
+        // Windows Alt (Alt+F4, menu accelerators, etc.). Forward Alt lazily so
+        // it never interferes with the Option navigation mappings above.
+        if (!cmdKeyDown && optKeyDown && !forwardedOptionAlt)
+        {
+            SendKey((ushort)VK_LMENU, true, false);
+            forwardedOptionAlt = true;
+        }
+
         // ====== Explorer: Enter → F2 (rename), Space → Enter (open) ======
         if (!cmdKeyDown && (vk == (uint)VK_RETURN || vk == (uint)VK_SPACE) &&
             !optKeyDown &&
             IsForegroundExplorerBrowser() && !IsTextInputActive())
         {
             if (isUp) return (IntPtr)1;
-
-            if (vk == (uint)VK_RETURN)
-            {
-                SendKey((ushort)VK_F2, true,  false);
-                SendKey((ushort)VK_F2, false, false);
-                return (IntPtr)1;
-            }
-            if (vk == (uint)VK_SPACE)
-            {
-                SendKey((ushort)VK_RETURN, true,  false);
-                SendKey((ushort)VK_RETURN, false, false);
-                return (IntPtr)1;
-            }
+            ushort target = MacKeysRules.GetExplorerItemTarget(vk);
+            SendKey(target, true,  false);
+            SendKey(target, false, false);
+            return (IntPtr)1;
         }
 
         if (!cmdKeyDown)
             return CallNextHookEx(hookId, nCode, wParam, lParam);
 
-        if (passthroughKeys.Contains(vk))
+        if (MacKeysRules.IsCommandPassthroughKey(vk))
             return CallNextHookEx(hookId, nCode, wParam, lParam);
+
+        // Cmd+L -> F6 (focus address bar in browsers).
+        // Ctrl+L doesn't work while Win is physically held, so use F6
+        // which achieves the same result without any modifier.
+        if (vk == 0x4C)
+        {
+            if (isUp) return (IntPtr)1;
+            SendKey(0x75, true,  false);  // F6 down
+            SendKey(0x75, false, false);  // F6 up
+            return (IntPtr)1;
+        }
 
         // Cmd+Tab -> Alt+Tab
         if (vk == (uint)VK_TAB)
@@ -507,7 +554,7 @@ public static class MacKeysEngine
         }
 
         // Cmd+Letter -> Ctrl+Letter
-        if (ctrlMappedKeys.Contains(vk))
+        if (MacKeysRules.IsCtrlMappedKey(vk))
         {
             SendBatch(new INPUT[] {
                 MakeKeyInput((ushort)VK_LCONTROL, true,  false),
@@ -518,19 +565,12 @@ public static class MacKeysEngine
             return (IntPtr)1;
         }
 
-        // Cmd+Left -> Home
-        if (vk == (uint)VK_LEFT)
+        // Cmd+Left/Right -> Home/End
+        ushort horizontalTarget = MacKeysRules.GetCommandHorizontalTarget(vk);
+        if (horizontalTarget != 0)
         {
-            SendKey((ushort)VK_HOME, true,  true);
-            SendKey((ushort)VK_HOME, false, true);
-            return (IntPtr)1;
-        }
-
-        // Cmd+Right -> End
-        if (vk == (uint)VK_RIGHT)
-        {
-            SendKey((ushort)VK_END, true,  true);
-            SendKey((ushort)VK_END, false, true);
+            SendKey(horizontalTarget, true,  true);
+            SendKey(horizontalTarget, false, true);
             return (IntPtr)1;
         }
 

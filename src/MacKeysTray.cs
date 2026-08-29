@@ -9,9 +9,12 @@ public class MacKeysTray : Form
     // ===================== State =====================
 
     private static bool paused = false;
+    private static bool useAltAsCommand = false;
+    private static volatile bool foregroundAppExcluded = false;
 
     private static HashSet<string> excludedApps = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     private static string settingsPath;
+    private static string modePath;
 
     /// <summary>Set by PS1 host before Main() — full path to RunTray.vbs.</summary>
     public static string VbsPath = null;
@@ -22,6 +25,7 @@ public class MacKeysTray : Form
     private NotifyIcon trayIcon;
     private MenuItem   pauseItem;
     private MenuItem   statusItem;
+    private System.Windows.Forms.Timer foregroundTimer;
 
     // ===================== Settings =====================
 
@@ -33,6 +37,20 @@ public class MacKeysTray : Form
         if (!Directory.Exists(appDir))
             Directory.CreateDirectory(appDir);
         settingsPath = Path.Combine(appDir, "excluded.txt");
+        modePath = Path.Combine(appDir, "keyboard-mode.txt");
+
+        // Load keyboard mode
+        useAltAsCommand = false;
+        if (File.Exists(modePath))
+        {
+            try
+            {
+                string mode = File.ReadAllText(modePath).Trim().ToLowerInvariant();
+                useAltAsCommand = (mode == "standard");
+            }
+            catch { }
+        }
+        MacKeysEngine.UseAltAsCommand = useAltAsCommand;
 
         excludedApps.Clear();
 
@@ -329,11 +347,34 @@ public class MacKeysTray : Form
 
         LoadSettings();
 
-        // Tell the shared engine when we're disabled
-        MacKeysEngine.IsDisabledCheck = () => paused || IsForegroundAppExcluded();
+        // Keep process inspection out of the low-level keyboard callback.
+        // A slow callback can cause Windows to silently remove the hook.
+        foregroundAppExcluded = IsForegroundAppExcluded();
+        MacKeysEngine.IsDisabledCheck = () => paused || foregroundAppExcluded;
+        foregroundTimer = new System.Windows.Forms.Timer();
+        foregroundTimer.Interval = 250;
+        foregroundTimer.Tick += delegate {
+            bool wasExcluded = foregroundAppExcluded;
+            foregroundAppExcluded = IsForegroundAppExcluded();
+            if (!wasExcluded && foregroundAppExcluded)
+                MacKeysEngine.ResetState();
+        };
+        foregroundTimer.Start();
 
         pauseItem = new MenuItem("Pause", OnPauseToggle);
         statusItem = new MenuItem("Mac Keys - Active") { Enabled = false };
+
+        MenuItem macKbItem = new MenuItem("Mac Keyboard", OnKeyboardMode);
+        MenuItem stdKbItem = new MenuItem("Standard Keyboard", OnKeyboardMode);
+        macKbItem.Tag = "mac";
+        stdKbItem.Tag = "standard";
+        if (useAltAsCommand)
+            stdKbItem.Checked = true;
+        else
+            macKbItem.Checked = true;
+
+        MenuItem kbMenu = new MenuItem("Keyboard Layout",
+            new MenuItem[] { macKbItem, stdKbItem });
 
         MenuItem prefsItem = new MenuItem("Preferences...", delegate { ShowPreferences(); });
 
@@ -341,6 +382,7 @@ public class MacKeysTray : Form
         {
             statusItem,
             new MenuItem("-"),
+            kbMenu,
             prefsItem,
             pauseItem,
             new MenuItem("-"),
@@ -354,7 +396,14 @@ public class MacKeysTray : Form
         trayIcon.Visible = true;
         trayIcon.DoubleClick += OnPauseToggle;
 
-        MacKeysEngine.InstallHook();
+        if (!MacKeysEngine.InstallHook())
+        {
+            trayIcon.Visible = false;
+            MessageBox.Show("Mac Keys could not install its keyboard hook.\n\nClose any older Mac Keys process and try again.",
+                "Mac Keys", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            BeginInvoke((MethodInvoker)delegate { Close(); });
+            return;
+        }
 
         trayIcon.BalloonTipTitle = "Mac Keys";
         trayIcon.BalloonTipText = "Mac-style keyboard shortcuts are active.\nRight-click the tray icon for options.";
@@ -365,6 +414,7 @@ public class MacKeysTray : Form
     private void OnPauseToggle(object sender, EventArgs e)
     {
         paused = !paused;
+        MacKeysEngine.ResetState();
         if (paused)
         {
             pauseItem.Text = "Resume";
@@ -381,8 +431,25 @@ public class MacKeysTray : Form
         }
     }
 
+    private void OnKeyboardMode(object sender, EventArgs e)
+    {
+        MenuItem clicked = (MenuItem)sender;
+        string mode = (string)clicked.Tag;
+        useAltAsCommand = (mode == "standard");
+        MacKeysEngine.ResetState();
+        MacKeysEngine.UseAltAsCommand = useAltAsCommand;
+
+        // Update check marks
+        foreach (MenuItem item in clicked.Parent.MenuItems)
+            item.Checked = (item == clicked);
+
+        // Persist
+        try { File.WriteAllText(modePath, mode); } catch { }
+    }
+
     private void OnExit(object sender, EventArgs e)
     {
+        if (foregroundTimer != null) foregroundTimer.Stop();
         MacKeysEngine.UninstallHook();
         trayIcon.Visible = false;
         trayIcon.Dispose();
@@ -391,6 +458,7 @@ public class MacKeysTray : Form
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
+        if (foregroundTimer != null) foregroundTimer.Stop();
         MacKeysEngine.UninstallHook();
         trayIcon.Visible = false;
         trayIcon.Dispose();
@@ -408,40 +476,15 @@ public class MacKeysTray : Form
 
         if (!createdNew)
         {
-            // Signal the existing instance to exit
-            try
-            {
-                EventWaitHandle evt = EventWaitHandle.OpenExisting("MacKeysForWindows_Restart");
-                evt.Set();
-                evt.Close();
-            }
-            catch { }
-
-            // Wait for the old instance to release the mutex
-            try
-            {
-                if (!appMutex.WaitOne(5000))
-                    return;
-            }
-            catch (AbandonedMutexException) { /* old instance was killed — that's fine */ }
+            // Do not restart a healthy instance when a startup shortcut or an
+            // accidental double-click launches a duplicate.
+            appMutex.Close();
+            return;
         }
-
-        // Create restart event so a future instance can signal us
-        EventWaitHandle restartEvent = new EventWaitHandle(false, EventResetMode.ManualReset, "MacKeysForWindows_Restart");
-
-        Thread restartThread = new Thread(() =>
-        {
-            restartEvent.WaitOne();
-            restartEvent.Close();
-            Application.Exit();
-        });
-        restartThread.IsBackground = true;
-        restartThread.Start();
 
         Application.EnableVisualStyles();
         Application.Run(new MacKeysTray());
 
-        restartEvent.Close();
         appMutex.ReleaseMutex();
         appMutex.Close();
     }

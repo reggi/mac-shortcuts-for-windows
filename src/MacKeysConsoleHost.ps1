@@ -7,8 +7,9 @@
 #>
 
 $engineCode  = Get-Content "$PSScriptRoot\MacKeysEngine.cs" -Raw
+$rulesCode   = Get-Content "$PSScriptRoot\MacKeysRules.cs" -Raw
 $consoleCode = Get-Content "$PSScriptRoot\MacKeysConsole.cs" -Raw
 
-Add-Type -TypeDefinition ($engineCode + $consoleCode) -ReferencedAssemblies System.Windows.Forms, System.Drawing
+Add-Type -TypeDefinition ($engineCode + $rulesCode + $consoleCode) -ReferencedAssemblies System.Windows.Forms, System.Drawing
 
 [MacKeysConsole]::Run()
